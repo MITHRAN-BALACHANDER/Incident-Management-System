@@ -60,4 +60,27 @@ export class IncidentsService {
   async updateStatus(id: string, status: WorkItemStatus) {
     return this.workflow.transition(id, status);
   }
+
+  /**
+   * Analytics: Retrieve signals per minute for a specific component.
+   * Utilizes MongoDB Time-Series aggregation framework.
+   */
+  async getSignalsPerMinute(componentId: string) {
+    return this.signalModel.aggregate([
+      { $match: { componentId } },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$timestamp' },
+            month: { $month: '$timestamp' },
+            day: { $dayOfMonth: '$timestamp' },
+            hour: { $hour: '$timestamp' },
+            minute: { $minute: '$timestamp' },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { '_id': 1 } },
+    ]);
+  }
 }

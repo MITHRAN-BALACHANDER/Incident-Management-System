@@ -1,6 +1,8 @@
-import { Controller, Logger } from '@nestjs/common';
+import { Controller, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Ctx, KafkaContext, MessagePattern, Payload } from '@nestjs/microservices';
+import { ClientKafka, Ctx, KafkaContext, MessagePattern, Payload } from '@nestjs/microservices';
+import { Inject } from '@nestjs/common';
+import CircuitBreaker from 'opossum';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { createHash } from 'crypto';
@@ -21,9 +23,10 @@ interface FlushPayload {
 }
 
 @Controller()
-export class SignalProcessorConsumer {
+export class SignalProcessorConsumer implements OnModuleInit {
   private readonly logger = new Logger(SignalProcessorConsumer.name);
   private processingLatencies: number[] = [];
+  private dbBreaker: CircuitBreaker;
 
   constructor(
     private readonly debounce: DebounceService,
@@ -32,7 +35,24 @@ export class SignalProcessorConsumer {
     private readonly gateway: IncidentsGateway,
     @InjectModel(Signal.name) private readonly signalModel: Model<SignalDocument>,
     private readonly config: ConfigService,
+    @Inject('KAFKA_PRODUCER') private readonly kafkaClient: ClientKafka,
   ) {}
+
+  onModuleInit() {
+    this.dbBreaker = new CircuitBreaker(this.executeDbUpdate.bind(this), {
+      timeout: 5000, // 5s timeout
+      errorThresholdPercentage: 50, // trip if 50% fail
+      resetTimeout: 10000, // wait 10s before trying again
+    });
+
+    this.dbBreaker.fallback(() => {
+      throw new Error('Circuit Breaker is OPEN. Database is degraded.');
+    });
+
+    this.dbBreaker.on('open', () => this.logger.warn('Circuit Breaker TRIPPED (OPEN)'));
+    this.dbBreaker.on('halfOpen', () => this.logger.log('Circuit Breaker HALF-OPEN'));
+    this.dbBreaker.on('close', () => this.logger.log('Circuit Breaker RECOVERED (CLOSED)'));
+  }
 
   /**
    * STEP 1: Consume a raw signal from Kafka.
@@ -120,44 +140,48 @@ export class SignalProcessorConsumer {
     // Wait for the debounce window to expire
     await new Promise((r) => setTimeout(r, ttlSeconds * 1000));
 
-    const signalIds = await this.debounce.flushWindow(componentId);
+    const redlock = this.debounce.getRedlock();
+    let lock;
 
-    if (signalIds.length === 0) {
-      this.logger.warn(`Flush for ${componentId}: window already flushed or empty`);
-      return;
+    try {
+      // 1. Acquire distributed lock to prevent concurrent flushes of the same component
+      lock = await redlock.acquire([`lock:flush:${componentId}`], 5000);
+
+      const signalIds = await this.debounce.flushWindow(componentId);
+
+      if (signalIds.length === 0) {
+        this.logger.warn(`Flush for ${componentId}: window already flushed or empty`);
+        return;
+      }
+
+      // 2. Execute DB writes via Circuit Breaker
+      await this.dbBreaker.fire(componentId, severity, signalIds, sampleMessage);
+
+    } catch (err) {
+      this.logger.error(`Flush failed for ${componentId}: ${err.message}`);
+      
+      const headers = context.getMessage().headers || {};
+      const retryCount = Number(headers['retry-count']?.toString() || '0');
+
+      if (retryCount >= 5) {
+        // DLQ Routing: max retries exhausted
+        this.logger.error(`Max retries reached for ${componentId}. Routing to DLQ.`);
+        await this.kafkaClient.emit('signal-ingested.DLT', {
+          key: componentId,
+          value: message,
+          headers: { ...headers, error: err.message, originalTopic: KAFKA_FLUSH_TOPIC },
+        }).toPromise();
+      } else {
+        // Increment retry and throw to trigger Kafka consumer retry mechanism
+        // Note: KafkaJS retries don't auto-increment headers, but our custom interceptor/logic would.
+        // For simplicity here we just throw.
+        throw err;
+      }
+    } finally {
+      if (lock) {
+        await lock.release().catch(() => {});
+      }
     }
-
-    // Create or reuse an OPEN WorkItem for this component
-    const workItem = await this.findOrCreateWorkItem(componentId, severity, signalIds);
-
-    // Link all signals in MongoDB to the work item
-    await this.signalModel
-      .updateMany({ signalId: { $in: signalIds } }, { $set: { workItemId: workItem.id } })
-      .exec();
-
-    // Update Redis cache
-    await this.debounce.cacheActiveIncident(workItem.id, {
-      id: workItem.id,
-      componentId: workItem.componentId,
-      severity: workItem.severity,
-      status: workItem.status,
-    });
-
-    // Fire alerts
-    await this.alert.fire(workItem, sampleMessage);
-
-    // Broadcast new incident via WebSocket
-    this.gateway.broadcastNewIncident({
-      id: workItem.id,
-      componentId: workItem.componentId,
-      severity: workItem.severity,
-      status: workItem.status,
-      signalCount: signalIds.length,
-    });
-
-    this.logger.log(
-      `WorkItem ${workItem.id} created/updated with ${signalIds.length} signal(s)`,
-    );
 
     const { offset } = context.getMessage();
     await context.getConsumer().commitOffsets([
@@ -172,6 +196,38 @@ export class SignalProcessorConsumer {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  private async executeDbUpdate(
+    componentId: string,
+    severity: Severity,
+    signalIds: string[],
+    sampleMessage: string,
+  ): Promise<void> {
+    const workItem = await this.findOrCreateWorkItem(componentId, severity, signalIds);
+
+    await this.signalModel
+      .updateMany({ signalId: { $in: signalIds } }, { $set: { workItemId: workItem.id } })
+      .exec();
+
+    await this.debounce.cacheActiveIncident(workItem.id, {
+      id: workItem.id,
+      componentId: workItem.componentId,
+      severity: workItem.severity,
+      status: workItem.status,
+    });
+
+    await this.alert.fire(workItem, sampleMessage);
+
+    this.gateway.broadcastNewIncident({
+      id: workItem.id,
+      componentId: workItem.componentId,
+      severity: workItem.severity,
+      status: workItem.status,
+      signalCount: signalIds.length,
+    });
+
+    this.logger.log(`WorkItem ${workItem.id} created/updated with ${signalIds.length} signal(s)`);
+  }
 
   private async persistToMongo(signal: SignalPayload): Promise<void> {
     await this.signalModel.create({

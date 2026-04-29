@@ -1,5 +1,5 @@
-import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -52,10 +52,18 @@ export class WorkflowService {
     const newStatus = context.transition(targetStatus);
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      return tx.workItem.update({
-        where: { id: workItemId },
-        data: { status: newStatus },
+      const result = await tx.workItem.updateMany({
+        where: { id: workItemId, version: workItem.version },
+        data: { status: newStatus, version: { increment: 1 } },
       });
+
+      if (result.count === 0) {
+        throw new ConflictException(
+          `Concurrent update detected for WorkItem ${workItemId}. Please try again.`,
+        );
+      }
+
+      return tx.workItem.findUniqueOrThrow({ where: { id: workItemId } });
     });
 
     this.logger.log(

@@ -5,8 +5,10 @@ import {
   HttpStatus,
   Logger,
   Post,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
+import { Severity } from '../common/enums/severity.enum';
 import { Throttle } from '@nestjs/throttler';
 import { randomUUID } from 'crypto';
 import { SignalProducerService } from '../queue/signal-producer.service';
@@ -27,6 +29,12 @@ export class IngestionController {
   @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 500, ttl: 1000 } }) // 500 req/s per IP
   async ingest(@Body() dto: CreateSignalDto): Promise<{ accepted: true; signalId: string }> {
+    // Load Shedding: Drop P2 traffic if system is severely backlogged
+    if (dto.severity === Severity.P2 && this.producer.isOverloaded()) {
+      this.logger.warn(`Load Shedding active: Dropped P2 signal for ${dto.componentId}`);
+      throw new ServiceUnavailableException('System overloaded, dropping non-critical traffic');
+    }
+
     const signalId = randomUUID();
 
     await this.producer.push({

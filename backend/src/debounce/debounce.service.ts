@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import Redlock from 'redlock';
 import { Severity } from '../common/enums/severity.enum';
 import { getDebounceWindowSeconds } from '../common/utils/debounce-window.util';
 
@@ -8,6 +9,7 @@ import { getDebounceWindowSeconds } from '../common/utils/debounce-window.util';
 export class DebounceService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DebounceService.name);
   private redis: Redis;
+  private redlock: Redlock;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -21,6 +23,14 @@ export class DebounceService implements OnModuleInit, OnModuleDestroy {
 
     this.redis.on('connect', () => this.logger.log('Redis connected'));
     this.redis.on('error', (err) => this.logger.error(`Redis error: ${err.message}`));
+
+    this.redlock = new Redlock([this.redis], {
+      driftFactor: 0.01,
+      retryCount: 10,
+      retryDelay: 200,
+      retryJitter: 200,
+    });
+    this.redlock.on('clientError', (err) => this.logger.error(`Redlock error: ${err.message}`));
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -118,5 +128,9 @@ export class DebounceService implements OnModuleInit, OnModuleDestroy {
 
   getRedisClient(): Redis {
     return this.redis;
+  }
+
+  getRedlock(): Redlock {
+    return this.redlock;
   }
 }

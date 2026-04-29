@@ -27,6 +27,7 @@ model WorkItem {
   severity    Severity
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
+  version     Int            @default(1)
   rca         RCA?
 
   @@index([status])

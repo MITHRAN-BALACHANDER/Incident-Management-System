@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { IoAdapter } from '@nestjs/platform-socket.io';
+import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import {
   KAFKA_CLIENT_ID,
@@ -12,9 +13,8 @@ import {
 
 async function bootstrap() {
   // --- HTTP Application ---
-  const app = await NestFactory.create(AppModule, {
-    logger: ['log', 'warn', 'error', 'debug'],
-  });
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(app.get(Logger));
 
   // Global input validation (whitelist strips unknown props)
   app.useGlobalPipes(
@@ -56,7 +56,8 @@ async function bootstrap() {
       },
       run: {
         autoCommit: false, // manual offset commits for exactly-once processing
-        partitionsConsumedConcurrently: 10, // backpressure: 10 partitions concurrently
+        partitionsConsumedConcurrently: 100, // backpressure: scale up to 100 partitions
+        eachBatchAutoResolve: false,
       },
     },
   });

@@ -3,7 +3,15 @@ import { Document } from 'mongoose';
 
 export type SignalDocument = Signal & Document;
 
-@Schema({ collection: 'signals', timestamps: true })
+@Schema({
+  collection: 'signals',
+  timestamps: true,
+  timeseries: {
+    timeField: 'timestamp',
+    metaField: 'componentId',
+    granularity: 'seconds',
+  },
+})
 export class Signal {
   @Prop({ required: true, index: true })
   componentId: string;

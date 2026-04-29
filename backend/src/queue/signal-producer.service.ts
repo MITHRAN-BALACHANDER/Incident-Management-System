@@ -26,13 +26,11 @@ export class SignalProducerService implements OnModuleInit {
 
   /**
    * Publish a signal to the Kafka topic.
-   * Key = SHA256(componentId + timestamp) → guarantees idempotent delivery.
+   * Key = componentId → guarantees strict ordering per component.
    * Fire-and-forget with error logging — ingestion endpoint must not block.
    */
   async push(signal: SignalPayload): Promise<void> {
-    const key = createHash('sha256')
-      .update(`${signal.componentId}:${signal.timestamp}`)
-      .digest('hex');
+    const key = signal.componentId;
 
     this.signalCounter++;
 
@@ -51,5 +49,13 @@ export class SignalProducerService implements OnModuleInit {
 
   getSignalsPerSecond(): number {
     return this.signalsPerSecond;
+  }
+
+  /**
+   * Determine if the system is overloaded based on local ingestion rate vs processing capacity.
+   * In a real clustered environment, this would query Kafka JMX metrics for consumer lag.
+   */
+  isOverloaded(): boolean {
+    return this.signalsPerSecond > 5000; // Drop P2 if ingestion spikes > 5k/sec
   }
 }

@@ -13,6 +13,8 @@ import { IncidentsModule } from './incidents/incidents.module';
 import { GatewayModule } from './gateway/gateway.module';
 import { HealthModule } from './health/health.module';
 import { DebounceModule } from './debounce/debounce.module';
+import { PrometheusModule } from '@willsoto/nestjs-prometheus';
+import { LoggerModule } from 'nestjs-pino';
 
 @Module({
   imports: [
@@ -27,6 +29,18 @@ import { DebounceModule } from './debounce/debounce.module';
         limit: 500,
       },
     ]),
+
+    // Observability & Telemetry
+    PrometheusModule.register(),
+    LoggerModule.forRoot({
+      pinoHttp: {
+        level: process.env.NODE_ENV !== 'production' ? 'debug' : 'info',
+        transport:
+          process.env.NODE_ENV !== 'production'
+            ? { target: 'pino-pretty', options: { colorize: true } }
+            : undefined,
+      },
+    }),
 
     // Database layers (both global)
     PrismaModule,

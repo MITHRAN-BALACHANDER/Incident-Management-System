@@ -38,15 +38,15 @@ export class RcaService {
       );
     }
 
-    const startTime = new Date(dto.startTime);
-    const endTime = new Date(dto.endTime);
+    const actualStartTime = workItem.createdAt;
+    const submissionTime = new Date();
 
-    if (endTime <= startTime) {
-      throw new BadRequestException('endTime must be after startTime');
+    if (submissionTime <= actualStartTime) {
+      throw new BadRequestException('Submission time must be after incident start time');
     }
 
-    // MTTR in milliseconds
-    const mttr = endTime.getTime() - startTime.getTime();
+    // MTTR in milliseconds: exact duration from incident open to RCA submission
+    const mttr = submissionTime.getTime() - actualStartTime.getTime();
 
     const rca = await this.prisma.$transaction(async (tx) => {
       return tx.rCA.create({
