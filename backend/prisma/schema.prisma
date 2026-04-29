@@ -1,0 +1,48 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum WorkItemStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  CLOSED
+}
+
+enum Severity {
+  P0
+  P1
+  P2
+}
+
+model WorkItem {
+  id          String         @id @default(uuid())
+  componentId String
+  status      WorkItemStatus @default(OPEN)
+  severity    Severity
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  rca         RCA?
+
+  @@index([status])
+  @@index([componentId])
+  @@index([severity])
+}
+
+model RCA {
+  id              String   @id @default(uuid())
+  workItemId      String   @unique
+  workItem        WorkItem @relation(fields: [workItemId], references: [id])
+  rootCause       String
+  fixApplied      String
+  preventionSteps String
+  startTime       DateTime
+  endTime         DateTime
+  mttr            Int
+  createdAt       DateTime @default(now())
+}
